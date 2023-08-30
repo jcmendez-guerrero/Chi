@@ -169,9 +169,8 @@ pipeline {
         parallel {
           stage('Linting Standard CHI') {
             agent {
-              dockerfile {
-                filename getNodeAgentBlock()
-                dir 'cicd/docker/agent_images'
+              docker {
+                image getNodeAgentBlock(null, 'image')
                 label 'Docker-enabled'
                 args '-m 2G --shm-size=2gb'
               }
@@ -248,9 +247,8 @@ pipeline {
         parallel {
           stage ('Building Custom elements') {
             agent {
-              dockerfile {
-                filename getNodeAgentBlock()
-                dir 'cicd/docker/agent_images'
+              docker {
+                image getNodeAgentBlock(null, 'image')
                 label 'Docker-enabled'
                 args '-m 2G --shm-size=2gb'
               }
@@ -281,10 +279,9 @@ pipeline {
             }
           }
           stage ('Building Vue documentation system') {
-             agent {
-              dockerfile {
-                filename getNodeAgentBlock()
-                dir 'cicd/docker/agent_images'
+            agent {
+              docker {
+                image getNodeAgentBlock(null, 'image')
                 label 'Docker-enabled'
                 args '-m 2G --shm-size=2gb'
               }
@@ -301,9 +298,8 @@ pipeline {
       }
       stage ('Building Chi') {
         agent {
-          dockerfile {
-            filename getNodeAgentBlock()
-            dir 'cicd/docker/agent_images'
+          docker {
+            image getNodeAgentBlock(null, 'image')
             label 'Docker-enabled'
             args '-m 2G --shm-size=2gb'
           }
@@ -476,9 +472,8 @@ pipeline {
       }
       stage('Sonarqube Static Analysis') {
         agent {
-          dockerfile {
-            filename getNodeAgentBlock()
-            dir 'cicd/docker/agent_images'
+          docker {
+            image getNodeAgentBlock(null, 'image')
             label 'Docker-enabled'
             args '-m 2G --shm-size=2gb'
           }
@@ -560,9 +555,8 @@ pipeline {
         stages {
           stage('GitHub Release') {
             agent {
-              dockerfile {
-                filename getNodeAgentBlock()
-                dir 'cicd/docker/agent_images'
+              docker {
+                image getNodeAgentBlock(null, 'image')
                 label 'Docker-enabled'
                 args '-m 2G --shm-size=2gb'
               }
@@ -729,9 +723,8 @@ PolicyDocument
               }
             }
             agent {
-              dockerfile {
-                filename getNodeAgentBlock()
-                dir 'cicd/docker/agent_images'
+              docker {
+                image getNodeAgentBlock(null, 'image')
                 label 'Docker-enabled'
                 args '-m 2G --shm-size=2gb'
               }
@@ -816,11 +809,10 @@ PRDesc
           }
         }
       }
-      stage('Smoke Tests') {
+      stage('Prod Smoke Tests') {
         agent {
-          dockerfile {
-            filename getNodeAgentBlock()
-            dir 'cicd/docker/agent_images'
+          docker {
+            image getNodeAgentBlock(null, 'image')
             label 'Docker-enabled'
             args '-m 2G --shm-size=2gb'
           }
@@ -829,25 +821,45 @@ PRDesc
           beforeAgent true
           tag pattern: DEPLOY_TAG_PATTERN, comparator: "REGEXP"
         }
-        steps {
-          script {
-            sh "rm -rf cypress/reports/smokeTests && mkdir -p cypress/reports/smokeTests"
-            def bumpScope = ['chi']
-            if (env.VERSION_BUMP_SCOPE == 'chi_vue') {
-              bumpScope = ['chi-vue']
-            } else if (env.VERSION_BUMP_SCOPE == 'all') {
-              bumpScope = ['chi', 'chi-vue']
-            } else {
-              bumpScope = ['none']
+        stages {
+          stage("Smoke Test") {
+            steps {
+              script {
+                sh "rm -rf cypress/reports/smokeTests && mkdir -p cypress/reports/smokeTests"
+                def bumpScope = ['chi']
+                if (env.VERSION_BUMP_SCOPE == 'chi_vue') {
+                  bumpScope = ['chi-vue']
+                } else if (env.VERSION_BUMP_SCOPE == 'all') {
+                  bumpScope = ['chi', 'chi-vue']
+                } else {
+                  bumpScope = ['none']
+                }
+                bumpScope.each { scope ->
+                  smokeTestChecker(scope) 
+                }
+                stash name: 'smokeTests', includes:"cypress/reports/smokeTests/**"
+                jslPublishTestResults('cypress/reports/smokeTests/**')
+              }
             }
-            bumpScope.each { scope ->
-              smokeTestChecker(scope) 
+          }
+          stage("Quality Gate 7") {
+            when {
+              beforeAgent true
+              expression { return env.SMOKE_TEST_FAILURE != null && env.VERSION != null }
             }
-            stash name: 'smokeTests', includes:"cypress/reports/smokeTests/**"
-            jslPublishTestResults('cypress/reports/smokeTests/**')
+            steps {
+              script {
+                unstash 'smokeTests'
+                def newTag = env.IS_VUE3_TRIGGER.toBoolean() ? env.TAG_NAME.replace("##VUE3","") : env.TAG_NAME
+                withEnv(["TAG_NAME=${newTag}"]) {
+                  jslPostQualityGate7Validation("'cypress/reports/smokeTests/*.xml'")
+                }
+              }
+            }
           }
         }
       }
+
       stage('Adoption Stats') {
         agent {
           docker {
@@ -866,21 +878,11 @@ PRDesc
           script {
             if (env.TAG_NAME && env.TAG_NAME.toString().indexOf("##DEPLOYMENT##") != -1) {
               env.DEVOPS_GCR_PREPROD_BRANCH = env.PROD_BRANCH
-              unstash name: "smokeTests"
-              zip zipFile: 'smoke_tests.zip', dir: "cypress/reports/smokeTests"
-              if (env.SMOKE_TEST_FAILURE != null && env.VERSION != null) {
-                //DevOpsGCR with release Version
-                echo "updating DevOpsGCR"
-                if (env.SMOKE_TEST_FAILURE == "false") {
-                  echo "release successfully created"
-                  jslGCRDevOpsUpdate('SUCCEEDS', ['smoke_tests.zip'])
-                } else {
-                  echo "failures creating release!"
-                  jslGCRDevOpsUpdate('FAILED', ['smoke_tests.zip'], "SmokeTests failed after release creation")
-                }
-              }
               echo "Adding smoke Tests / smoke Test hook to Adoption Stats"
-              jslAdoptionMain('cypress/reports/smokeTests/*.xml', env.SCAN_BRANCH, env.COMMIT_ID, env.JOB_NAME, env.GITHUB_TOKEN_CREDENTIALS, "yyyy-MM-dd'T'HH:mm:ss'Z'" , [booleanParam(name:'isVue3',value: env.IS_VUE3_TRIGGER.toBoolean())] )
+              def newTag = env.IS_VUE3_TRIGGER.toBoolean() ? env.TAG_NAME.replace("##VUE3","") : env.TAG_NAME
+              withEnv(["TAG_NAME=${newTag}"]) {
+                jslAdoptionMain('cypress/reports/smokeTests/*.xml')
+              }
 
             } else {
               try {
@@ -903,14 +905,11 @@ PRDesc
                   touch reports/ci_report/xunitfinal.xml
                 """
               }
-              def vueTrigger = false
               if (isVersionBump(env.VERSION_BUMP_SCOPE)) {
                 //Set variable to trigger DevOps GCR Creation
                 env.DEVOPS_GCR_PREPROD_BRANCH = env.PROD_BRANCH
-                vueTrigger = ( env.IS_VUE3_TRIGGER.toBoolean() || env.BRANCH_NAME == env.VUE3_BRANCH )
-                println("Vue Trigger: ${vueTrigger} ; ${env.DEVOPS_GCR_PREPROD_BRANCH}")
               }
-              jslAdoptionMain('reports/ci_report/xunitfinal.xml',  env.SCAN_BRANCH, env.COMMIT_ID, env.JOB_NAME, env.GITHUB_TOKEN_CREDENTIALS, "yyyy-MM-dd'T'HH:mm:ss'Z'" , [booleanParam(name:'isVue3',value: env.IS_VUE3_TRIGGER.toBoolean())])
+              jslAdoptionMain('reports/ci_report/xunitfinal.xml')
             }
           }
         }
@@ -1057,12 +1056,11 @@ def printSummary() {
   def startedFromUpstream = buildCauses.any { cause -> cause._class == 'org.jenkinsci.plugins.workflow.support.steps.build.BuildUpstreamCause' }
   def baseJobName = env.JOB_NAME.replace("${env.JOB_BASE_NAME}", "${env.VUE3_BRANCH}")
   def causeUpstream = false
-  def isDevOpsGCRVue3 = false
   if (startedFromUpstream) {
     causeUpstream = buildCauses.any { cause -> cause.upstreamProject =~ /${baseJobName}/ }
-    isDevOpsGCRVue3 = buildCauses.any { cause -> cause.upstreamProject =~ /.*##(PROMOTE|DEPLOYMENT)##VUE3##.*/ }
   }
-  env.IS_VUE3_TRIGGER = (causeUpstream || isDevOpsGCRVue3) ? true : false
+  def isDevOpsGCRVue3 = env.TAG_NAME =~ /.*##(PROMOTE|DEPLOYMENT)##VUE3##.*/
+  env.IS_VUE3_TRIGGER = (causeUpstream || isDevOpsGCRVue3)
   if (env.BRANCH_NAME == env.VUE3_BRANCH || env.CHANGE_TARGET == env.VUE3_BRANCH || env.IS_VUE3_TRIGGER.toBoolean()) {
     env.PROD_BRANCH = env.VUE3_BRANCH
   } else {
@@ -1318,7 +1316,7 @@ def smokeTestChecker(def scope) {
     if (scope == 'chi-vue') {
       latestRelease = latestChiVueRelease.name.trim()
     }
-    jslGenerateManualTestReport("Version Release", "Check Version - ${scope}", "${version}", (latestRelease == version).toBoolean(), 1.0, "cypress/reports/smokeTests/smoke_test_result.xml")
+    jslGenerateManualTestReport("Version Release", "Check Version - ${scope}", "${version}", (latestRelease == version).toBoolean(), 1.0, "cypress/reports/smokeTests/smoke_test_result_${scope}.xml")
 
     if (env.SMOKE_TEST_FAILURE == null) {
       env.SMOKE_TEST_FAILURE = (latestRelease != version)
@@ -1331,6 +1329,6 @@ def smokeTestChecker(def scope) {
     """
   } else {
     echo "Smoke Test hook without release"
-    jslGenerateManualTestReport("Change without Release", "Hook test", "hookTest", true, 1.0, "cypress/reports/smokeTests/smoke_test_result.xml")
+    jslGenerateManualTestReport("Change without Release", "Hook test", "hookTest", true, 1.0, "cypress/reports/smokeTests/smoke_test_result_${scope}.xml")
   }
 }
